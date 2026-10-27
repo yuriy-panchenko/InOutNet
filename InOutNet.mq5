@@ -17,6 +17,8 @@ input double StopLoss = .0;	//	Stop Loss
 input double K = 1.0;		//	Good enough, in ATR * sqrt(Window)
 input double SpreadMult = 2.0;	//	Good enough floor, in spreads
 input int AtrPeriod = 14;	//	ATR period
+input double LearnRate = 0.01;	//	Learning rate
+input int Seed = 1;	//	Random seed for initial weights
 
 //+------------------------------------------------------------------+
 const int ENTRY_INPUT_SIZE = sizeof(Entry::State) / sizeof(double);
@@ -36,8 +38,9 @@ int gAtr = INVALID_HANDLE;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    gIn.Init(TOPOLOGY_ENTRY);
-    gOut.Init(TOPOLOGY_EXIT);
+    MathSrand(Seed);
+    gIn.Init(TOPOLOGY_ENTRY, LearnRate);
+    gOut.Init(TOPOLOGY_EXIT, LearnRate);
 //---
     gAtr = iATR(Symbol(), Period(), AtrPeriod);
     if(gAtr == INVALID_HANDLE)
