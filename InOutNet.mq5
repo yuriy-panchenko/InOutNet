@@ -80,7 +80,8 @@ void OnTick()
     if(isNewBar)
     {
         Entry::State enStt;
-        if(!CollectState(enStt))
+        Exit::State exStt;
+        if(!CollectState(enStt) || !CollectState(exStt))
             return;
         double atr;
         if(!ReadAtr(atr))
@@ -91,10 +92,8 @@ void OnTick()
             Entry::Sample sam;
             entrySams.GetReady(sam);
             //	teach network(s) on ready samples and clean used trades
-            double const bMax = sam.buy.peak - sam.buy.entry, sMax = sam.sell.entry - sam.sell.dip;
-            double const th = Threshold(sam);
             double oB, oS;
-            LabelExcessShare(bMax, sMax, th, oB, oS);
+            LabelExcessShare(sam.buy.peak - sam.buy.entry, sam.sell.entry - sam.sell.dip, Threshold(sam), oB, oS);
             gIn.Think(ToInput(sam.state));
             gLossSum += gIn.Learn(oB, oS);
             if(oB + oS == 0)
@@ -117,20 +116,12 @@ void OnTick()
         //	trading
         if(PositionSelect(Symbol()))
         {
-            Exit::State state;
-
-            if(!CollectState(state))
-                return;
-
-            Vector out = gOut.Think(ToInput(state));
-
-            if(ShouldClose(out))
+            if(ShouldClose(gOut.Think(ToInput(exStt))))
                 CloseTrade();
         }
         else
         {
-            Vector out = gIn.Think(ToInput(enStt));
-            int const iShould = ShouldTrade(out);
+            int const iShould = ShouldTrade(gIn.Think(ToInput(enStt)));
             if(iShould)
                 MakeTrade(iShould > 0);
         }
@@ -163,10 +154,16 @@ bool ReadAtr(double &atr)
     atr = buf[0];
     return true;
 }
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
 double Threshold(Entry::Sample const &s)
 {
     return MathMax(K * s.atr * MathSqrt(Window), SpreadMult * s.spread);
 }
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
 void LabelExcessShare(double b, double s, double th, double &ob, double &os)
 {
     double eb = MathMax(b - th, 0), es = MathMax(s - th, 0);
