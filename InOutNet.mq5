@@ -11,6 +11,7 @@
 #include "Network.mqh"
 #include "Features.mqh"
 #include "RingBuffer.mqh"
+#include "Log.mqh"
 #include <Trade/Trade.mqh>
 
 input int Window = 100;
@@ -26,6 +27,7 @@ input double LearnRate = 0.01;	//	Learning rate
 input int Seed = 1;	//	Random seed for initial weights
 input int WarmUp = 2000;	//	Train this many samples before trading
 input int LogEvery = 500;	//	Print training stats every N samples (0 = off)
+input string LogFile = "InOutNet_log.txt";	//	Also append log lines to this file in the common folder (empty = off)
 
 //+------------------------------------------------------------------+
 const int ENTRY_INPUT_SIZE = sizeof(Entry::State) / sizeof(double);
@@ -39,7 +41,7 @@ RingBuffer<Entry::Sample> entrySams(Window);
 RingBuffer<Exit::Sample> exitSams(Window);
 MqlTick lastTick;
 CTrade gTrade;
-double gLossSum = 0;
+double gLossSum = 0, gSumB = 0, gSumS = 0, gPrevB = 0.5, gPrevS = 0.5;
 int gFlat = 0;
 int gAtr = INVALID_HANDLE;
 
@@ -48,6 +50,9 @@ int gAtr = INVALID_HANDLE;
 //+------------------------------------------------------------------+
 int OnInit()
 {
+    LogInit(LogFile);
+    Log(StringFormat("=== run %s  Window=%d K=%.3f SpreadMult=%.2f Cutoff=%.3f LearnRate=%.4f Seed=%d WarmUp=%d SL=%.2f TP=%.2f",
+                     Symbol(), Window, K, SpreadMult, Cutoff, LearnRate, Seed, WarmUp, StopLoss, MarketTarget));
     MathSrand(Seed);
     gTrade.SetExpertMagicNumber(Magic);
     gIn.Init(TOPOLOGY_ENTRY, LearnRate);
@@ -103,13 +108,21 @@ void OnTick()
             LabelExcessShare(sam.buy.peak - sam.buy.entry, sam.sell.entry - sam.sell.dip, Threshold(sam), oB, oS);
             gIn.Think(ToInput(sam.state));
             gLossSum += gIn.Learn(oB, oS);
+            gSumB += oB;
+            gSumS += oS;
             if(oB + oS == 0)
                 ++gFlat;
             if(LogEvery > 0 && gIn.Trained() % LogEvery == 0)
             {
-                PrintFormat("trained %d  loss %.4f  flat %.0f%%",
-                            gIn.Trained(), gLossSum / LogEvery, 100.0 * gFlat / LogEvery);
-                gLossSum = 0;
+                //	base: best constant guess for this window; prev: previous window's mean as the guess
+                double const base = 0.5 * (CrossEntropy(gSumB, LogEvery, gSumB / LogEvery) + CrossEntropy(gSumS, LogEvery, gSumS / LogEvery));
+                double const prev = 0.5 * (CrossEntropy(gSumB, LogEvery, gPrevB) + CrossEntropy(gSumS, LogEvery, gPrevS));
+                Log(StringFormat("trained %d  loss %.4f  base %.4f  prev %.4f  flat %.0f%%  buy %.0f%%  sell %.0f%%",
+                                 gIn.Trained(), gLossSum / LogEvery, base, prev,
+                                 100.0 * gFlat / LogEvery, 100.0 * gSumB / LogEvery, 100.0 * gSumS / LogEvery));
+                gPrevB = gSumB / LogEvery;
+                gPrevS = gSumS / LogEvery;
+                gLossSum = gSumB = gSumS = 0;
                 gFlat = 0;
             }
         }
@@ -128,9 +141,10 @@ void OnTick()
         }
         else
         {
-            int const iShould = ShouldTrade(gIn.Think(ToInput(enStt)));
-            if(iShould)
-                MakeTrade(iShould > 0);
+            Vector const out = gIn.Think(ToInput(enStt));
+            int const iShould = ShouldTrade(out);
+            if(iShould && MakeTrade(iShould > 0))
+                Log(StringFormat("open %s  out buy %.3f sell %.3f", iShould > 0 ? "BUY" : "SELL", out.Get(0), out.Get(1)));
         }
     }
 }
@@ -141,8 +155,13 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                         const MqlTradeRequest& request,
                         const MqlTradeResult& result)
 {
-//---
-
+    if(trans.type != TRADE_TRANSACTION_DEAL_ADD || !HistoryDealSelect(trans.deal))
+        return;
+    if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != Magic || HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+        return;
+    double const net = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
+                       + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
+    Log(StringFormat("close  net %.2f  balance %.2f", net, AccountInfoDouble(ACCOUNT_BALANCE)));
 }
 //+------------------------------------------------------------------+
 bool CollectState(Entry::State &state)
@@ -239,6 +258,11 @@ bool ReadAtr(double &atr)
 //+------------------------------------------------------------------+
 //|                                                                  |
 //+------------------------------------------------------------------+
+double CrossEntropy(double sum, int n, double p)   // mean loss of guessing constant p for n targets that add up to sum
+{
+    p = MathMin(MathMax(p, 1e-6), 1.0 - 1e-6);
+    return -(sum * MathLog(p) + (n - sum) * MathLog(1.0 - p)) / n;
+}
 double Threshold(Entry::Sample const &s)
 {
     return MathMax(K * s.atr * MathSqrt(Window), SpreadMult * s.spread);
