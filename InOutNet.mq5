@@ -11,10 +11,14 @@
 #include "Network.mqh"
 #include "Features.mqh"
 #include "RingBuffer.mqh"
+#include <Trade/Trade.mqh>
 
 input int Window = 100;
-input double MarketTarget = .0;	//	Market Target
-input double StopLoss = .0;	//	Stop Loss
+input double MarketTarget = .0;	//	Take profit, in ATR (0 = off)
+input double StopLoss = .0;	//	Stop loss, in ATR (0 = off)
+input double Cutoff = 0.6;	//	Min network output to open a trade
+input double Lots = 0.1;	//	Trade volume
+input long Magic = 20261027;	//	Magic number
 input double K = 1.0;		//	Good enough, in ATR * sqrt(Window)
 input double SpreadMult = 2.0;	//	Good enough floor, in spreads
 input int AtrPeriod = 14;	//	ATR period
@@ -34,6 +38,7 @@ Network gIn, gOut;
 RingBuffer<Entry::Sample> entrySams(Window);
 RingBuffer<Exit::Sample> exitSams(Window);
 MqlTick lastTick;
+CTrade gTrade;
 double gLossSum = 0;
 int gFlat = 0;
 int gAtr = INVALID_HANDLE;
@@ -44,6 +49,7 @@ int gAtr = INVALID_HANDLE;
 int OnInit()
 {
     MathSrand(Seed);
+    gTrade.SetExpertMagicNumber(Magic);
     gIn.Init(TOPOLOGY_ENTRY, LearnRate);
     gOut.Init(TOPOLOGY_EXIT, LearnRate);
 //---
@@ -115,7 +121,7 @@ void OnTick()
             return;
 
         //	trading
-        if(PositionSelect(Symbol()))
+        if(SelectOurPosition())
         {
             if(ShouldClose(gOut.Think(ToInput(exStt))))
                 CloseTrade();
@@ -144,12 +150,84 @@ bool CollectState(Entry::State &state)
     double atr;
     return ReadAtr(atr) && MakeEntryState(state, atr, lastTick.ask - lastTick.bid);
 }
-bool CollectState(Exit::State &state);
-Vector ToInput(Exit::State const &state);
-bool ShouldClose(Vector const&);
-void CloseTrade();
-int ShouldTrade(Vector const&);
-bool MakeTrade(bool isBuy);
+//	exit side: placeholders until the exit network is designed
+bool CollectState(Exit::State &state)
+{
+    state._ = 0;
+    return true;
+}
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+Vector ToInput(Exit::State const &state)
+{
+    return Vector(EXIT_INPUT_SIZE, 0.0);
+}
+//+------------------------------------------------------------------+
+//| Trading                                                          |
+//+------------------------------------------------------------------+
+bool SelectOurPosition()
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetTicket(i) == 0)
+            continue;
+        if(PositionGetString(POSITION_SYMBOL) == Symbol() && PositionGetInteger(POSITION_MAGIC) == Magic)
+            return true;
+    }
+    return false;
+}
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+int ShouldTrade(Vector const &out)   // +1 buy, -1 sell, 0 stay out
+{
+    double const b = out.Get(0), s = out.Get(1);
+    if(b > s && b > Cutoff)
+        return 1;
+    if(s > b && s > Cutoff)
+        return -1;
+    return 0;
+}
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+bool ShouldClose(Vector const&)   // placeholder: close after the training horizon
+{
+    datetime const opened = (datetime)PositionGetInteger(POSITION_TIME);
+    return iBarShift(Symbol(), Period(), opened) >= Window;
+}
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+bool MakeTrade(bool isBuy)
+{
+    double atr;
+    if(!ReadAtr(atr))
+        return false;
+    int const digits = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+    double const price = isBuy ? lastTick.ask : lastTick.bid;
+    double const dir = isBuy ? 1.0 : -1.0;
+    double const sl = StopLoss > 0 ? NormalizeDouble(price - dir * StopLoss * atr, digits) : 0;
+    double const tp = MarketTarget > 0 ? NormalizeDouble(price + dir * MarketTarget * atr, digits) : 0;
+    bool const ok = isBuy ? gTrade.Buy(Lots, Symbol(), 0, sl, tp) : gTrade.Sell(Lots, Symbol(), 0, sl, tp);
+    if(!ok)
+        PrintFormat("MakeTrade(%s) failed, retcode %d", isBuy ? "buy" : "sell", gTrade.ResultRetcode());
+    return ok;
+}
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void CloseTrade()
+{
+    if(!SelectOurPosition())
+        return;
+    if(!gTrade.PositionClose((ulong)PositionGetInteger(POSITION_TICKET)))
+        PrintFormat("CloseTrade failed, retcode %d", gTrade.ResultRetcode());
+}
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
 bool ReadAtr(double &atr)
 {
     double buf[1];
