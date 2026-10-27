@@ -42,7 +42,7 @@ RingBuffer<Exit::Sample> exitSams(Window);
 MqlTick lastTick;
 CTrade gTrade;
 double gLossSum = 0, gSumB = 0, gSumS = 0, gPrevB = 0.5, gPrevS = 0.5;
-int gFlat = 0;
+int gFlat = 0, gDirN = 0, gDirHit = 0, gDirNAll = 0, gDirHitAll = 0;
 int gAtr = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
@@ -106,24 +106,37 @@ void OnTick()
             //	teach network(s) on ready samples and clean used trades
             double oB, oS;
             LabelExcessShare(sam.buy.peak - sam.buy.entry, sam.sell.entry - sam.sell.dip, Threshold(sam), oB, oS);
-            gIn.Think(ToInput(sam.state));
+            Vector const pred = gIn.Think(ToInput(sam.state));
             gLossSum += gIn.Learn(oB, oS);
             gSumB += oB;
             gSumS += oS;
             if(oB + oS == 0)
                 ++gFlat;
+            if(MathAbs(oB - oS) > 0.5)   // clearly directional label: did the net pick the right side?
+            {
+                bool const hit = (pred.Get(0) > pred.Get(1)) == (oB > oS);
+                ++gDirN;
+                ++gDirNAll;
+                if(hit)
+                {
+                    ++gDirHit;
+                    ++gDirHitAll;
+                }
+            }
             if(LogEvery > 0 && gIn.Trained() % LogEvery == 0)
             {
                 //	base: best constant guess for this window; prev: previous window's mean as the guess
                 double const base = 0.5 * (CrossEntropy(gSumB, LogEvery, gSumB / LogEvery) + CrossEntropy(gSumS, LogEvery, gSumS / LogEvery));
                 double const prev = 0.5 * (CrossEntropy(gSumB, LogEvery, gPrevB) + CrossEntropy(gSumS, LogEvery, gPrevS));
-                Log(StringFormat("trained %d  loss %.4f  base %.4f  prev %.4f  flat %.0f%%  buy %.0f%%  sell %.0f%%",
+                Log(StringFormat("trained %d  loss %.4f  base %.4f  prev %.4f  flat %.0f%%  buy %.0f%%  sell %.0f%%  dir %.0f%% (n=%d)  dirAll %.1f%% (n=%d)",
                                  gIn.Trained(), gLossSum / LogEvery, base, prev,
-                                 100.0 * gFlat / LogEvery, 100.0 * gSumB / LogEvery, 100.0 * gSumS / LogEvery));
+                                 100.0 * gFlat / LogEvery, 100.0 * gSumB / LogEvery, 100.0 * gSumS / LogEvery,
+                                 gDirN > 0 ? 100.0 * gDirHit / gDirN : 0.0, gDirN,
+                                 gDirNAll > 0 ? 100.0 * gDirHitAll / gDirNAll : 0.0, gDirNAll));
                 gPrevB = gSumB / LogEvery;
                 gPrevS = gSumS / LogEvery;
                 gLossSum = gSumB = gSumS = 0;
-                gFlat = 0;
+                gFlat = gDirN = gDirHit = 0;
             }
         }
         //	add new virtual trades buy and sell
