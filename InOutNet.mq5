@@ -72,6 +72,11 @@ void OnTick()
             Entry::Sample sam;
             entrySams.GetReady(sam);
             //	teach network(s) on ready samples and clean used trades
+            double const bMax = sam.buy.peak - sam.buy.entry, sMax = sam.sell.entry - sam.sell.dip;
+            double oB, oS;
+            LabelExcessShare(bMax, sMax, th, oB, oS);
+            gIn.Think(ToInput(sam.state));
+            gIn.Learn(oB, oS)
         }
         //	add new virtual trades buy and sell
         entrySams.Add(Entry::Sample(enStt, current_bar_time, .0, lastTick));
