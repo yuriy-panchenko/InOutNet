@@ -19,6 +19,8 @@ input double SpreadMult = 2.0;	//	Good enough floor, in spreads
 input int AtrPeriod = 14;	//	ATR period
 input double LearnRate = 0.01;	//	Learning rate
 input int Seed = 1;	//	Random seed for initial weights
+input int WarmUp = 2000;	//	Train this many samples before trading
+input int LogEvery = 500;	//	Print training stats every N samples (0 = off)
 
 //+------------------------------------------------------------------+
 const int ENTRY_INPUT_SIZE = sizeof(Entry::State) / sizeof(double);
@@ -31,6 +33,8 @@ Network gIn, gOut;
 RingBuffer<Entry::Sample> entrySams(Window);
 RingBuffer<Exit::Sample> exitSams(Window);
 MqlTick lastTick;
+double gLossSum = 0;
+int gFlat = 0;
 int gAtr = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
@@ -92,11 +96,23 @@ void OnTick()
             double oB, oS;
             LabelExcessShare(bMax, sMax, th, oB, oS);
             gIn.Think(ToInput(sam.state));
-            gIn.Learn(oB, oS);
+            gLossSum += gIn.Learn(oB, oS);
+            if(oB + oS == 0)
+                ++gFlat;
+            if(LogEvery > 0 && gIn.Trained() % LogEvery == 0)
+            {
+                PrintFormat("trained %d  loss %.4f  flat %.0f%%",
+                            gIn.Trained(), gLossSum / LogEvery, 100.0 * gFlat / LogEvery);
+                gLossSum = 0;
+                gFlat = 0;
+            }
         }
         //	add new virtual trades buy and sell
         entrySams.Add(Entry::Sample(enStt, current_bar_time, atr, lastTick));
         g_last_bar_time = current_bar_time;
+
+        if(gIn.Trained() < WarmUp)
+            return;
 
         //	trading
         if(PositionSelect(Symbol()))
