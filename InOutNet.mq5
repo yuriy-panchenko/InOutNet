@@ -9,6 +9,7 @@
 
 #include "Types.mqh"
 #include "Network.mqh"
+#include "Features.mqh"
 #include "RingBuffer.mqh"
 
 input int Window = 100;
@@ -138,9 +139,12 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 
 }
 //+------------------------------------------------------------------+
-bool CollectState(Entry::State &state);	// 0 is just created
+bool CollectState(Entry::State &state)
+{
+    double atr;
+    return ReadAtr(atr) && MakeEntryState(state, atr, lastTick.ask - lastTick.bid);
+}
 bool CollectState(Exit::State &state);
-Vector ToInput(Entry::State const &state);
 Vector ToInput(Exit::State const &state);
 bool ShouldClose(Vector const&);
 void CloseTrade();

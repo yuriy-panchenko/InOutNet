@@ -6,11 +6,13 @@
 #ifndef INCLUDE_TYPES
 #define INCLUDE_TYPES
 
+#define ENTRY_FEATURES 14   // keep in sync with Features.mqh
+
 namespace Entry
 {
 struct State
 {
-    double _;
+    double f[ENTRY_FEATURES];
 };
 
 struct Side
