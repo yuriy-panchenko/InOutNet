@@ -76,7 +76,7 @@ struct State
 struct Sample
 {
     State state;
-    void Update(MqlTick const&);
+    void Update(MqlTick const&) {}	//	stub until exit design
 };
 }
 

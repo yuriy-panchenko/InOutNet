@@ -14,6 +14,9 @@
 input int Window = 100;
 input double MarketTarget = .0;	//	Market Target
 input double StopLoss = .0;	//	Stop Loss
+input double K = 1.0;		//	Good enough, in ATR * sqrt(Window)
+input double SpreadMult = 2.0;	//	Good enough floor, in spreads
+input int AtrPeriod = 14;	//	ATR period
 
 //+------------------------------------------------------------------+
 const int ENTRY_INPUT_SIZE = sizeof(Entry::State) / sizeof(double);
@@ -26,6 +29,7 @@ Network gIn, gOut;
 RingBuffer<Entry::Sample> entrySams(Window);
 RingBuffer<Exit::Sample> exitSams(Window);
 MqlTick lastTick;
+int gAtr = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -35,6 +39,9 @@ int OnInit()
     gIn.Init(TOPOLOGY_ENTRY);
     gOut.Init(TOPOLOGY_EXIT);
 //---
+    gAtr = iATR(Symbol(), Period(), AtrPeriod);
+    if(gAtr == INVALID_HANDLE)
+        return INIT_FAILED;
     g_last_bar_time = iTime(Symbol(), Period(), 0);
     if(!SymbolInfoTick(Symbol(), lastTick))
         return INIT_FAILED;
@@ -45,6 +52,8 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+    if(gAtr != INVALID_HANDLE)
+        IndicatorRelease(gAtr);
 }
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
@@ -66,6 +75,9 @@ void OnTick()
         Entry::State enStt;
         if(!CollectState(enStt))
             return;
+        double atr;
+        if(!ReadAtr(atr))
+            return;
         //	collect finished v. trades
         if(entrySams.HasReady())
         {
@@ -73,13 +85,14 @@ void OnTick()
             entrySams.GetReady(sam);
             //	teach network(s) on ready samples and clean used trades
             double const bMax = sam.buy.peak - sam.buy.entry, sMax = sam.sell.entry - sam.sell.dip;
+            double const th = Threshold(sam);
             double oB, oS;
             LabelExcessShare(bMax, sMax, th, oB, oS);
             gIn.Think(ToInput(sam.state));
-            gIn.Learn(oB, oS)
+            gIn.Learn(oB, oS);
         }
         //	add new virtual trades buy and sell
-        entrySams.Add(Entry::Sample(enStt, current_bar_time, .0, lastTick));
+        entrySams.Add(Entry::Sample(enStt, current_bar_time, atr, lastTick));
         g_last_bar_time = current_bar_time;
 
         //	trading
@@ -123,6 +136,18 @@ bool ShouldClose(Vector const&);
 void CloseTrade();
 int ShouldTrade(Vector const&);
 bool MakeTrade(bool isBuy);
+bool ReadAtr(double &atr)
+{
+    double buf[1];
+    if(CopyBuffer(gAtr, 0, 1, 1, buf) != 1 || buf[0] <= 0)
+        return false;
+    atr = buf[0];
+    return true;
+}
+double Threshold(Entry::Sample const &s)
+{
+    return MathMax(K * s.atr * MathSqrt(Window), SpreadMult * s.spread);
+}
 void LabelExcessShare(double b, double s, double th, double &ob, double &os)
 {
     double eb = MathMax(b - th, 0), es = MathMax(s - th, 0);
