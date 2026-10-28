@@ -28,6 +28,7 @@ input double LearnRate = 0.01;	//	Learning rate
 input int Seed = 1;	//	Random seed for initial weights
 input int WarmUp = 2000;	//	Train this many samples before trading
 input int LogEvery = 500;	//	Print training stats every N samples (0 = off)
+input int LogExitEvery = 0;	//	Log the exit state every N bars of an open position (0 = off)
 input int ExportEvery = 0;	//	Export every Nth matured sample to InOutNet_samples.csv (0 = off)
 input string LogFile = "InOutNet_log.txt";	//	Also append log lines to this file in the common folder (empty = off)
 
@@ -47,6 +48,8 @@ double gLossSum = 0, gSumB = 0, gSumS = 0, gPrevB = 0.5, gPrevS = 0.5;
 int gFlat = 0, gDirN = 0, gDirHit = 0, gDirNAll = 0, gDirHitAll = 0, gSat = 0, gNFAll = 0, gFAll = 0;
 double gActNFAll = 0, gActFAll = 0;
 int gAtr = INVALID_HANDLE;
+ulong gPosTicket = 0;	//	our open position, as seen by TrackPosition
+double gPosPeak = 0;	//	best mark-to-market pnl of it since open, in price units
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -94,12 +97,12 @@ void OnTick()
 
     //	update all virtual trades with current bis/ask
     entrySams.Update(lastTick);
+    TrackPosition();
 
     if(isNewBar)
     {
         Entry::State enStt;
-        Exit::State exStt;
-        if(!CollectState(enStt) || !CollectState(exStt))
+        if(!CollectState(enStt))
             return;
         double atr;
         if(!ReadAtr(atr))
@@ -178,6 +181,8 @@ void OnTick()
         //	trading
         if(SelectOurPosition())
         {
+            Exit::State exStt;
+            CollectState(exStt, enStt, atr);   // zeroed on failure: a bad state never blocks the exit
             if(ShouldClose(gOut.Think(ToInput(exStt))))
                 CloseTrade();
         }
@@ -210,18 +215,25 @@ bool CollectState(Entry::State &state)
     double atr;
     return ReadAtr(atr) && MakeEntryState(state, atr, lastTick.ask - lastTick.bid);
 }
-//	exit side: placeholders until the exit network is designed
-bool CollectState(Exit::State &state)
+//	exit side: the position's point of view; call only while our position is selected
+void CollectState(Exit::State &state, Entry::State const &market, double atr)
 {
-    state._ = 0;
-    return true;
-}
-//+------------------------------------------------------------------+
-//|                                                                  |
-//+------------------------------------------------------------------+
-Vector ToInput(Exit::State const &state)
-{
-    return Vector(EXIT_INPUT_SIZE, 0.0);
+    datetime const opened = (datetime)PositionGetInteger(POSITION_TIME);
+    int const age = iBarShift(Symbol(), Period(), opened);
+    bool const isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+    if(!MakeExitState(state, market, isBuy, PositionPnl(), gPosPeak, age, atr, Window))
+    {
+        for(int i = 0; i < EXIT_FEATURES; i++)
+            state.f[i] = 0.0;
+        return;
+    }
+    if(LogExitEvery > 0 && age % LogExitEvery == 0)
+    {
+        string line = StringFormat("exit state age %d:", age);
+        for(int i = 0; i < EXIT_FEATURES; i++)
+            line += StringFormat(" %.2f", state.f[i]);
+        Log(line);
+    }
 }
 //+------------------------------------------------------------------+
 //| Trading                                                          |
@@ -236,6 +248,31 @@ bool SelectOurPosition()
             return true;
     }
     return false;
+}
+//+------------------------------------------------------------------+
+//| Mark-to-market pnl of the selected position, in price units.     |
+//| POSITION_PRICE_CURRENT is the price we would close at (bid for a |
+//| buy, ask for a sell), so the exit cost is already in it.         |
+//+------------------------------------------------------------------+
+double PositionPnl()
+{
+    double const dir = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? 1.0 : -1.0;
+    return dir * (PositionGetDouble(POSITION_PRICE_CURRENT) - PositionGetDouble(POSITION_PRICE_OPEN));
+}
+//+------------------------------------------------------------------+
+//| Every tick: keep the best pnl of our position since it opened.   |
+//+------------------------------------------------------------------+
+void TrackPosition()
+{
+    if(!SelectOurPosition())
+    {
+        gPosTicket = 0;
+        return;
+    }
+    ulong const ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+    double const pnl = PositionPnl();
+    gPosPeak = ticket == gPosTicket ? MathMax(gPosPeak, pnl) : pnl;
+    gPosTicket = ticket;
 }
 //+------------------------------------------------------------------+
 //|                                                                  |

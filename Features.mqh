@@ -75,4 +75,55 @@ Vector ToInput(Entry::State const &s)
     return v;
 }
 
+//+------------------------------------------------------------------+
+//| Exit features: the position's point of view.                     |
+//|  0..13  the 14 entry features; for a sell the market is mirrored |
+//|         (0..7 change sign, upper and lower wick swap), so one    |
+//|         network serves both sides                                |
+//|  14     pnl, in ATR*sqrt(Window)                                 |
+//|  15     pnl, in ATR*sqrt(age)      (z-score of the time elapsed) |
+//|  16     age / Window                                             |
+//|  17     best pnl since open, in ATR*sqrt(Window)                 |
+//|  18     drop from that best, in ATR*sqrt(Window)                 |
+//|  pnl is mark-to-market in price units: closing price minus the   |
+//|  opening price, so it starts at about -spread.                   |
+//+------------------------------------------------------------------+
+bool MakeExitState(Exit::State &s, Entry::State const &market, bool isBuy, double pnl, double peak, int age, double atr, int window)
+{
+    if(atr <= 0 || window <= 0)
+        return false;
+
+    for(int i = 0; i < ENTRY_FEATURES; i++)
+        s.f[i] = market.f[i];
+    if(!isBuy)
+    {
+        for(int i = 0; i <= 7; i++)
+            s.f[i] = -market.f[i];
+        s.f[8] = market.f[9];
+        s.f[9] = market.f[8];
+    }
+
+    double const unitW = atr * MathSqrt((double)window);
+    double const unitT = atr * MathSqrt((double)MathMax(age, 1));
+    int k = ENTRY_FEATURES;
+    s.f[k++] = MathTanh(pnl / unitW);
+    s.f[k++] = MathTanh(pnl / unitT);
+    s.f[k++] = MathMin((double)age / window, 2.0);
+    s.f[k++] = MathTanh(peak / unitW);
+    s.f[k++] = MathTanh((peak - pnl) / unitW);
+
+    for(int i = 0; i < EXIT_FEATURES; i++)
+        if(!MathIsValidNumber(s.f[i]))
+            return false;
+    return k == EXIT_FEATURES;
+}
+
+Vector ToInput(Exit::State const &s)
+{
+    Vector v(EXIT_FEATURES, 0.0);
+    for(int i = 0; i < EXIT_FEATURES; i++)
+        v.Set(i, s.f[i]);
+    return v;
+}
+
 #endif //	INCLUDE_FEATURES

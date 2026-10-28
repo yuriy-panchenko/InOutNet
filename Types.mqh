@@ -7,6 +7,7 @@
 #define INCLUDE_TYPES
 
 #define ENTRY_FEATURES 14   // keep in sync with Features.mqh
+#define EXIT_FEATURES (ENTRY_FEATURES + 5)   // mirrored market features + 5 position ones; keep in sync with Features.mqh
 
 namespace Entry
 {
@@ -75,7 +76,7 @@ namespace Exit
 {
 struct State
 {
-    double _;
+    double f[EXIT_FEATURES];
 };
 
 struct Sample
