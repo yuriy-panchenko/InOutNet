@@ -12,6 +12,7 @@
 #include "Features.mqh"
 #include "RingBuffer.mqh"
 #include "Log.mqh"
+#include "Export.mqh"
 #include <Trade/Trade.mqh>
 
 input int Window = 100;
@@ -27,6 +28,7 @@ input double LearnRate = 0.01;	//	Learning rate
 input int Seed = 1;	//	Random seed for initial weights
 input int WarmUp = 2000;	//	Train this many samples before trading
 input int LogEvery = 500;	//	Print training stats every N samples (0 = off)
+input int ExportEvery = 0;	//	Export every Nth matured sample to InOutNet_samples.csv (0 = off)
 input string LogFile = "InOutNet_log.txt";	//	Also append log lines to this file in the common folder (empty = off)
 
 //+------------------------------------------------------------------+
@@ -42,7 +44,8 @@ RingBuffer<Exit::Sample> exitSams(Window);
 MqlTick lastTick;
 CTrade gTrade;
 double gLossSum = 0, gSumB = 0, gSumS = 0, gPrevB = 0.5, gPrevS = 0.5;
-int gFlat = 0, gDirN = 0, gDirHit = 0, gDirNAll = 0, gDirHitAll = 0;
+int gFlat = 0, gDirN = 0, gDirHit = 0, gDirNAll = 0, gDirHitAll = 0, gSat = 0, gNFAll = 0, gFAll = 0;
+double gActNFAll = 0, gActFAll = 0;
 int gAtr = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
@@ -51,6 +54,8 @@ int gAtr = INVALID_HANDLE;
 int OnInit()
 {
     LogInit(LogFile);
+    if(ExportEvery > 0)
+        ExportOpen("InOutNet_samples.csv");
     Log(StringFormat("=== run %s  Window=%d K=%.3f SpreadMult=%.2f Cutoff=%.3f LearnRate=%.4f Seed=%d WarmUp=%d SL=%.2f TP=%.2f",
                      Symbol(), Window, K, SpreadMult, Cutoff, LearnRate, Seed, WarmUp, StopLoss, MarketTarget));
     MathSrand(Seed);
@@ -71,6 +76,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+    ExportClose();
     if(gAtr != INVALID_HANDLE)
         IndicatorRelease(gAtr);
 }
@@ -105,16 +111,35 @@ void OnTick()
             entrySams.GetReady(sam);
             //	teach network(s) on ready samples and clean used trades
             double oB, oS;
-            LabelExcessShare(sam.buy.peak - sam.buy.entry, sam.sell.entry - sam.sell.dip, Threshold(sam), oB, oS);
-            Vector const pred = gIn.Think(ToInput(sam.state));
-            gLossSum += gIn.Learn(oB, oS);
+            double const bMax = sam.buy.peak - sam.buy.entry, sMax = sam.sell.entry - sam.sell.dip, th = Threshold(sam);
+            LabelExcessShare(bMax, sMax, th, oB, oS);
+            if(ExportEvery > 0 && gIn.Trained() % ExportEvery == 0)
+                ExportRow(sam, bMax, sMax, th, oB, oS);
+            //	metrics use the prediction made at entry (weights then knew nothing about this outcome);
+            //	the Think below is only to set the activations for Learn
+            gIn.Think(ToInput(sam.state));
+            gIn.Learn(oB, oS);
+            gLossSum += PairLoss(sam.predBuy, sam.predSell, oB, oS);
             gSumB += oB;
             gSumS += oS;
+            //	honest activity check: does the net say 'something will happen' more when it really does?
+            double const act = sam.predBuy + sam.predSell;
             if(oB + oS == 0)
+            {
                 ++gFlat;
+                ++gFAll;
+                gActFAll += act;
+            }
+            else
+            {
+                ++gNFAll;
+                gActNFAll += act;
+            }
+            if(MathMax(sam.predBuy, sam.predSell) > 0.9)
+                ++gSat;
             if(MathAbs(oB - oS) > 0.5)   // clearly directional label: did the net pick the right side?
             {
-                bool const hit = (pred.Get(0) > pred.Get(1)) == (oB > oS);
+                bool const hit = (sam.predBuy > sam.predSell) == (oB > oS);
                 ++gDirN;
                 ++gDirNAll;
                 if(hit)
@@ -128,19 +153,23 @@ void OnTick()
                 //	base: best constant guess for this window; prev: previous window's mean as the guess
                 double const base = 0.5 * (CrossEntropy(gSumB, LogEvery, gSumB / LogEvery) + CrossEntropy(gSumS, LogEvery, gSumS / LogEvery));
                 double const prev = 0.5 * (CrossEntropy(gSumB, LogEvery, gPrevB) + CrossEntropy(gSumS, LogEvery, gPrevS));
-                Log(StringFormat("trained %d  loss %.4f  base %.4f  prev %.4f  flat %.0f%%  buy %.0f%%  sell %.0f%%  dir %.0f%% (n=%d)  dirAll %.1f%% (n=%d)",
+                Log(StringFormat("trained %d  loss %.4f  base %.4f  prev %.4f  flat %.0f%%  buy %.0f%%  sell %.0f%%  dir %.0f%% (n=%d)  dirAll %.1f%% (n=%d)  sure %.0f%%  actAll flat %.2f / move %.2f",
                                  gIn.Trained(), gLossSum / LogEvery, base, prev,
                                  100.0 * gFlat / LogEvery, 100.0 * gSumB / LogEvery, 100.0 * gSumS / LogEvery,
                                  gDirN > 0 ? 100.0 * gDirHit / gDirN : 0.0, gDirN,
-                                 gDirNAll > 0 ? 100.0 * gDirHitAll / gDirNAll : 0.0, gDirNAll));
+                                 gDirNAll > 0 ? 100.0 * gDirHitAll / gDirNAll : 0.0, gDirNAll,
+                                 100.0 * gSat / LogEvery,
+                                 gFAll > 0 ? gActFAll / gFAll : 0.0, gNFAll > 0 ? gActNFAll / gNFAll : 0.0));
                 gPrevB = gSumB / LogEvery;
                 gPrevS = gSumS / LogEvery;
                 gLossSum = gSumB = gSumS = 0;
-                gFlat = gDirN = gDirHit = 0;
+                gFlat = gDirN = gDirHit = gSat = 0;
             }
         }
+        //	the network's call for this bar, made once with the weights it has now
+        Vector const out = gIn.Think(ToInput(enStt));
         //	add new virtual trades buy and sell
-        entrySams.Add(Entry::Sample(enStt, current_bar_time, atr, lastTick));
+        entrySams.Add(Entry::Sample(enStt, current_bar_time, atr, lastTick, out.Get(0), out.Get(1)));
         g_last_bar_time = current_bar_time;
 
         if(gIn.Trained() < WarmUp)
@@ -154,7 +183,6 @@ void OnTick()
         }
         else
         {
-            Vector const out = gIn.Think(ToInput(enStt));
             int const iShould = ShouldTrade(out);
             if(iShould && MakeTrade(iShould > 0))
                 Log(StringFormat("open %s  out buy %.3f sell %.3f", iShould > 0 ? "BUY" : "SELL", out.Get(0), out.Get(1)));
@@ -275,6 +303,10 @@ double CrossEntropy(double sum, int n, double p)   // mean loss of guessing cons
 {
     p = MathMin(MathMax(p, 1e-6), 1.0 - 1e-6);
     return -(sum * MathLog(p) + (n - sum) * MathLog(1.0 - p)) / n;
+}
+double PairLoss(double pB, double pS, double tB, double tS)   // mean cross-entropy of the two outputs
+{
+    return 0.5 * (CrossEntropy(tB, 1, pB) + CrossEntropy(tS, 1, pS));
 }
 double Threshold(Entry::Sample const &s)
 {

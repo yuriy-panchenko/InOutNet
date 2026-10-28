@@ -49,14 +49,17 @@ struct Sample
     State state;
     datetime time;
     double atr, spread;
+    double predBuy, predSell;   // what the network said at entry, before the outcome was known
     Side buy, sell;
 
     Sample() {}
-    Sample(State const& s, datetime dt, double ATR, MqlTick const& tick)
+    Sample(State const& s, datetime dt, double ATR, MqlTick const& tick, double pB, double pS)
         : state(s)
         , time(dt)
         , atr(ATR)
         , spread(tick.ask - tick.bid)
+        , predBuy(pB)
+        , predSell(pS)
         , buy(tick.ask, tick.bid, dt)
         , sell(tick.bid, tick.ask, dt)
     {}
