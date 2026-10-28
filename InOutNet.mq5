@@ -29,6 +29,9 @@ input int Seed = 1;	//	Random seed for initial weights
 input int WarmUp = 2000;	//	Train this many samples before trading
 input int LogEvery = 500;	//	Print training stats every N samples (0 = off)
 input int LogExitEvery = 0;	//	Log the exit state every N bars of an open position (0 = off)
+input int ExitHorizon = 20;	//	Exit label: bars ahead that holding is judged over
+input int ExitPerBar = 4;	//	Exit samples drawn from the virtual trades each bar (0 = exit training off)
+input double ExitLearnRate = 0.0002;	//	Learning rate of the exit network
 input int ExportEvery = 0;	//	Export every Nth matured sample to InOutNet_samples.csv (0 = off)
 input string LogFile = "InOutNet_log.txt";	//	Also append log lines to this file in the common folder (empty = off)
 
@@ -39,9 +42,55 @@ const int TOPOLOGY_ENTRY[] = {ENTRY_INPUT_SIZE, ENTRY_INPUT_SIZE * 2, ENTRY_INPU
 const int TOPOLOGY_EXIT[] = {EXIT_INPUT_SIZE, EXIT_INPUT_SIZE * 2, EXIT_INPUT_SIZE * 2, 10, 1};
 
 datetime g_last_bar_time;
+//	exit training metrics; a = prediction - 0.5, b = label - 0.5
+struct ExitStats
+{
+    int n, nHit, hit;
+    double loss, sumT, sumP, sA, sB, sAA, sBB, sAB;
+
+    ExitStats() { Reset(); }
+    void Reset()
+    {
+        n = nHit = hit = 0;
+        loss = sumT = sumP = sA = sB = sAA = sBB = sAB = 0;
+    }
+    void Add(double pred, double label, double l)
+    {
+        double const a = pred - 0.5, b = label - 0.5;
+        ++n;
+        loss += l;
+        sumT += label;
+        sumP += pred;
+        sA += a;
+        sB += b;
+        sAA += a * a;
+        sBB += b * b;
+        sAB += a * b;
+        if(MathAbs(b) > 0.1)   // a clear outcome: did the net lean the right way?
+        {
+            ++nHit;
+            if((a > 0) == (b > 0))
+                ++hit;
+        }
+    }
+    double Corr()const
+    {
+        if(n < 2)
+            return 0;
+        double const va = sAA - sA * sA / n, vb = sBB - sB * sB / n;
+        return va > 0 && vb > 0 ? (sAB - sA * sB / n) / MathSqrt(va * vb) : 0;
+    }
+    double HitPct()const
+    {
+        return nHit > 0 ? 100.0 * hit / nHit : 0;
+    }
+};
+
 Network gIn, gOut;
+ExitStats gXWin, gXAll;
 RingBuffer<Entry::Sample> entrySams(Window);
-RingBuffer<Exit::Sample> exitSams(Window);
+Fifo<Exit::Sample> exitQ((ExitHorizon + 1) * MathMax(ExitPerBar, 1));
+int gExitBar = 0;
 MqlTick lastTick;
 CTrade gTrade;
 double gLossSum = 0, gSumB = 0, gSumS = 0, gPrevB = 0.5, gPrevS = 0.5;
@@ -64,7 +113,8 @@ int OnInit()
     MathSrand(Seed);
     gTrade.SetExpertMagicNumber(Magic);
     gIn.Init(TOPOLOGY_ENTRY, LearnRate);
-    gOut.Init(TOPOLOGY_EXIT, LearnRate);
+    gOut.Init(TOPOLOGY_EXIT, ExitLearnRate);
+    Log(StringFormat("=== exit  horizon=%d perBar=%d learnRate=%.4f", ExitHorizon, ExitPerBar, ExitLearnRate));
 //---
     gAtr = iATR(Symbol(), Period(), AtrPeriod);
     if(gAtr == INVALID_HANDLE)
@@ -175,6 +225,9 @@ void OnTick()
         entrySams.Add(Entry::Sample(enStt, current_bar_time, atr, lastTick, out.Get(0), out.Get(1)));
         g_last_bar_time = current_bar_time;
 
+        if(ExitPerBar > 0)
+            ExitStep(enStt, atr);
+
         if(gIn.Trained() < WarmUp)
             return;
 
@@ -221,7 +274,7 @@ void CollectState(Exit::State &state, Entry::State const &market, double atr)
     datetime const opened = (datetime)PositionGetInteger(POSITION_TIME);
     int const age = iBarShift(Symbol(), Period(), opened);
     bool const isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
-    if(!MakeExitState(state, market, isBuy, PositionPnl(), gPosPeak, age, atr, Window))
+    if(!MakeExitState(state, market, isBuy, PositionPnl(), gPosPeak, age, atr, Window, lastTick.ask - lastTick.bid))
     {
         for(int i = 0; i < EXIT_FEATURES; i++)
             state.f[i] = 0.0;
@@ -229,7 +282,7 @@ void CollectState(Exit::State &state, Entry::State const &market, double atr)
     }
     if(LogExitEvery > 0 && age % LogExitEvery == 0)
     {
-        string line = StringFormat("exit state age %d:", age);
+        string line = StringFormat("exit state %s age %d:", isBuy ? "BUY" : "SELL", age);
         for(int i = 0; i < EXIT_FEATURES; i++)
             line += StringFormat(" %.2f", state.f[i]);
         Log(line);
@@ -248,6 +301,77 @@ bool SelectOurPosition()
             return true;
     }
     return false;
+}
+//+------------------------------------------------------------------+
+//| Exit training, once per new bar. First learn from the samples    |
+//| whose horizon has passed: the label is what holding ExitHorizon  |
+//| more bars added to the mark-to-market pnl, 0.5*(1+tanh(x)) with  |
+//| x in ATR*sqrt(horizon). Then draw new samples from the virtual   |
+//| trades (random age 1..Window, random side), with the state the   |
+//| position would have now and the net's own prediction.            |
+//+------------------------------------------------------------------+
+void ExitStep(Entry::State const &market, double atr)
+{
+    ++gExitBar;
+    while(exitQ.Size() > 0)
+    {
+        Exit::Sample sam;
+        exitQ.Front(sam);
+        if(sam.bar + ExitHorizon > gExitBar)
+            break;
+        exitQ.Pop();
+        double const dir = sam.isBuy ? 1.0 : -1.0;
+        double const mark = sam.isBuy ? lastTick.bid : lastTick.ask;
+        double const x = dir * (mark - sam.mark) / (sam.atr * MathSqrt((double)ExitHorizon));
+        double const label = 0.5 * (1.0 + MathTanh(x));
+        //	metrics use the prediction made at creation; the Think below only sets the activations for Learn
+        double const loss = CrossEntropy(label, 1, sam.pred);
+        gXWin.Add(sam.pred, label, loss);
+        gXAll.Add(sam.pred, label, loss);
+        gOut.Think(ToInput(sam.state));
+        Vector t(1, 0.0);
+        t.Set(0, label);
+        gOut.Learn(t);
+        if(LogEvery > 0 && gOut.Trained() % (LogEvery * ExitPerBar) == 0)
+        {
+            double const n = gXWin.n;
+            Log(StringFormat("exit trained %d  loss %.4f  base %.4f  corr %+.3f  hit %.1f%% (n=%d)  |  all: corr %+.3f  hit %.1f%% (n=%d)  meanLabel %.3f  meanPred %.3f",
+                             gOut.Trained(), gXWin.loss / n, CrossEntropy(gXWin.sumT, gXWin.n, gXWin.sumT / n),
+                             gXWin.Corr(), gXWin.HitPct(), gXWin.nHit,
+                             gXAll.Corr(), gXAll.HitPct(), gXAll.nHit,
+                             gXWin.sumT / n, gXWin.sumP / n));
+            gXWin.Reset();
+        }
+    }
+
+    int const live = entrySams.Count();   // virtual trades alive; the newest one was opened this bar (age 0)
+    if(live < 2)
+        return;
+    double const spread = lastTick.ask - lastTick.bid;
+    for(int k = 0; k < ExitPerBar; k++)
+    {
+        int const age = 1 + MathRand() % MathMin(live - 1, Window);
+        bool const isBuy = (MathRand() & 1) == 1;
+        Entry::Sample v;
+        if(!entrySams.GetBack(age, v))
+            continue;
+        double pnl, peak;
+        if(isBuy)
+        {
+            pnl = lastTick.bid - v.buy.entry;
+            peak = v.buy.peak - v.buy.entry;
+        }
+        else
+        {
+            pnl = v.sell.entry - lastTick.ask;
+            peak = v.sell.entry - v.sell.dip;
+        }
+        Exit::State st;
+        if(!MakeExitState(st, market, isBuy, pnl, peak, age, atr, Window, spread))
+            continue;
+        double const pred = gOut.Think(ToInput(st)).Get(0);
+        exitQ.Push(Exit::Sample(st, gExitBar, isBuy, isBuy ? lastTick.bid : lastTick.ask, atr, pred));
+    }
 }
 //+------------------------------------------------------------------+
 //| Mark-to-market pnl of the selected position, in price units.     |

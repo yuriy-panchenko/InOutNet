@@ -82,7 +82,20 @@ struct State
 struct Sample
 {
     State state;
-    void Update(MqlTick const&) {}	//	stub until exit design
+    int bar;           // bar counter when the sample was drawn
+    bool isBuy;
+    double mark, atr;  // closing price of its side then (bid for a buy, ask for a sell), and ATR
+    double pred;       // what the exit network said then, before the outcome was known
+
+    Sample() {}
+    Sample(State const& s, int b, bool buy, double m, double ATR, double p)
+        : state(s)
+        , bar(b)
+        , isBuy(buy)
+        , mark(m)
+        , atr(ATR)
+        , pred(p)
+    {}
 };
 }
 

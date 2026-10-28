@@ -79,7 +79,9 @@ Vector ToInput(Entry::State const &s)
 //| Exit features: the position's point of view.                     |
 //|  0..13  the 14 entry features; for a sell the market is mirrored |
 //|         (0..7 change sign, upper and lower wick swap), so one    |
-//|         network serves both sides                                |
+//|         network serves both sides. 13 (spread in ATR) is redone  |
+//|         as tanh(2x): the entry's tanh(10x) sat above 0.9 half    |
+//|         of the time                                              |
 //|  14     pnl, in ATR*sqrt(Window)                                 |
 //|  15     pnl, in ATR*sqrt(age)      (z-score of the time elapsed) |
 //|  16     age / Window                                             |
@@ -88,7 +90,7 @@ Vector ToInput(Entry::State const &s)
 //|  pnl is mark-to-market in price units: closing price minus the   |
 //|  opening price, so it starts at about -spread.                   |
 //+------------------------------------------------------------------+
-bool MakeExitState(Exit::State &s, Entry::State const &market, bool isBuy, double pnl, double peak, int age, double atr, int window)
+bool MakeExitState(Exit::State &s, Entry::State const &market, bool isBuy, double pnl, double peak, int age, double atr, int window, double spread)
 {
     if(atr <= 0 || window <= 0)
         return false;
@@ -102,6 +104,7 @@ bool MakeExitState(Exit::State &s, Entry::State const &market, bool isBuy, doubl
         s.f[8] = market.f[9];
         s.f[9] = market.f[8];
     }
+    s.f[ENTRY_FEATURES - 1] = MathTanh(2.0 * spread / atr);
 
     double const unitW = atr * MathSqrt((double)window);
     double const unitT = atr * MathSqrt((double)MathMax(age, 1));

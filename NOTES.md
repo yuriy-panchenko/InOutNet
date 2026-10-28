@@ -15,7 +15,7 @@ Read this first in a new chat, then pull the repo (`git clone` works in Claude's
 - Online SGD (`Network::Learn`, tanh hidden, sigmoid out, cross-entropy), one step per matured sample, `LearnRate` input.
 - Live: trade the larger output if above `Cutoff` (0.6); fixed hold of `Window` bars (placeholder exit); optional SL/TP in ATR (default off). Warm-up: no trading until `WarmUp` samples trained.
 - Files: `InOutNet.mq5`, `Types.mqh`, `Network.mqh`, `Features.mqh` (14 features, completed bars only), `RingBuffer.mqh`, `Log.mqh` (log file in common folder), `Export.mqh` (`ExportEvery` input writes matured samples to `InOutNet_samples.csv`). `Vector.mqh` is the user's own long-used class, outside the repo (no include guard, not to be changed).
-- Patches 1-13 were produced and applied locally; check the repo for the latest.
+- Patches 1-13 were produced and applied locally; 14 (exit state) and 15 (exit samples and training) came later. Check the repo for the latest.
 
 ## Results so far
 1. Defaults (Window 100, K 1.0, LearnRate 0.01), Jan-Oct 2026: about -300 to -470 net, ~1,680 trades, 51.5% won. Earlier no-TP/K=0.6 runs were worse (one stopped out at balance 1,306).
@@ -30,6 +30,14 @@ Read this first in a new chat, then pull the repo (`git clone` works in Claude's
 - Online SGD on consecutive, near-identical samples chases the recent regime and is overconfident; a replay buffer + lower learning rate is the likely fix (not done).
 - Labels use peaks/dips, but the placeholder exit realises the profit at the end of the window (mismatch); TP at th (`MarketTarget = 10*K`) was tried once in a worse setting.
 - Exit network labels/state are not designed.
+
+## Exit side (patches 14-15)
+- Idea: decide live, every bar, from the position's own state; the future is only used to make training labels.
+- Exit state (19 inputs, `MakeExitState`): the 14 entry features (mirrored for a sell: f0-7 change sign, wicks swap; f13 spread redone as tanh(2*spread/ATR) because tanh(10x) saturated) + pnl in ATR*sqrt(Window), pnl in ATR*sqrt(age), age/Window, best pnl since open, drop from that best. pnl is mark-to-market (bid for a buy, ask for a sell), so it starts at about -spread.
+- Exit samples (patch 15): every new bar `ExitPerBar` (4) random (virtual trade, side) pairs are drawn from the entry virtual trades (ages 1..Window); state and the net's own prediction are stored; `ExitHorizon` (20) bars later the label is 0.5*(1+tanh(dir*(mark_now - mark_then)/(ATR*sqrt(N)))), i.e. what holding added versus closing at that moment. One SGD step each, `ExitLearnRate` 0.0002. Low on purpose: in a synthetic test (random walk vs planted mean reversion) 0.003 and above made the loss clearly worse than a constant guess even on pure noise, while 0.0001-0.0005 stayed at the baseline and found the planted structure (corr about +0.08).
+- Metrics use the prediction stored at creation: loss vs base (constant guess), corr(pred-0.5, label-0.5), hit rate where |label-0.5|>0.1. Samples overlap heavily, so the effective n is roughly bars/ExitHorizon, not the printed n: the noise of a correlation is about 1/sqrt(bars/20) (0.03 after 20k bars), so trust the cumulative numbers, not single windows.
+- Trading is still the placeholder (fixed hold of Window bars). Next: use the net in `ShouldClose` (close when output <= 0.5 + margin) and compare with the fixed hold and an ATR trailing stop on the same entries.
+- Window 250 run with `LogExitEvery=10` (45 trades) checked patch 14: state consistent (peak >= pnl, pnl sign matches the closed trade's net 45/45), position features rarely saturate.
 
 ## Pending
 - Full M1 history export from MetaTrader failed: "Max bars in chart" was 100,000 (only 2026-07-17..10-28 exported), then the script ended with "Abnormal termination". Plan was: raise the setting + restart, rerun `ExportBars.mq5` (10-day chunks, logs each chunk), or use Ctrl+U -> Bars -> Export Bars. Goal: ~20 months of M1 bars for offline (Python) feature/label research.
