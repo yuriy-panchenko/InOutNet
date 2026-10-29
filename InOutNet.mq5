@@ -15,6 +15,13 @@
 #include "Export.mqh"
 #include <Trade/Trade.mqh>
 
+enum ExitRule
+{
+    EXIT_FIXED,   // hold Window bars
+    EXIT_NET,     // close when the exit network says holding no longer pays
+    EXIT_TRAIL    // close when the price falls back from the best point of the trade
+};
+
 input int Window = 100;
 input double MarketTarget = .0;	//	Take profit, in ATR (0 = off)
 input double StopLoss = .0;	//	Stop loss, in ATR (0 = off)
@@ -32,6 +39,9 @@ input int LogExitEvery = 0;	//	Log the exit state every N bars of an open positi
 input int ExitHorizon = 20;	//	Exit label: bars ahead that holding is judged over
 input int ExitPerBar = 4;	//	Exit samples drawn from the virtual trades each bar (0 = exit training off)
 input double ExitLearnRate = 0.0002;	//	Learning rate of the exit network
+input ExitRule ExitMode = EXIT_FIXED;	//	How a position is closed (every mode closes at Window bars at the latest)
+input double ExitMargin = 0.0;	//	EXIT_NET: close when the exit network's output <= 0.5 + this
+input double TrailK = 0.5;	//	EXIT_TRAIL: close when the drop from the best pnl reaches this, in ATR * sqrt(Window)
 input int ExportEvery = 0;	//	Export every Nth matured sample to InOutNet_samples.csv (0 = off)
 input string LogFile = "InOutNet_log.txt";	//	Also append log lines to this file in the common folder (empty = off)
 
@@ -114,7 +124,7 @@ int OnInit()
     gTrade.SetExpertMagicNumber(Magic);
     gIn.Init(TOPOLOGY_ENTRY, LearnRate);
     gOut.Init(TOPOLOGY_EXIT, ExitLearnRate);
-    Log(StringFormat("=== exit  horizon=%d perBar=%d learnRate=%.4f", ExitHorizon, ExitPerBar, ExitLearnRate));
+    Log(StringFormat("=== exit  horizon=%d perBar=%d learnRate=%.4f  mode=%s margin=%.3f trailK=%.2f", ExitHorizon, ExitPerBar, ExitLearnRate, EnumToString(ExitMode), ExitMargin, TrailK));
 //---
     gAtr = iATR(Symbol(), Period(), AtrPeriod);
     if(gAtr == INVALID_HANDLE)
@@ -236,7 +246,7 @@ void OnTick()
         {
             Exit::State exStt;
             CollectState(exStt, enStt, atr);   // zeroed on failure: a bad state never blocks the exit
-            if(ShouldClose(gOut.Think(ToInput(exStt))))
+            if(ShouldClose(gOut.Think(ToInput(exStt)), exStt))
                 CloseTrade();
         }
         else
@@ -413,10 +423,20 @@ int ShouldTrade(Vector const &out)   // +1 buy, -1 sell, 0 stay out
 //+------------------------------------------------------------------+
 //|                                                                  |
 //+------------------------------------------------------------------+
-bool ShouldClose(Vector const&)   // placeholder: close after the training horizon
+bool ShouldClose(Vector const &out, Exit::State const &s)
 {
     datetime const opened = (datetime)PositionGetInteger(POSITION_TIME);
-    return iBarShift(Symbol(), Period(), opened) >= Window;
+    if(iBarShift(Symbol(), Period(), opened) >= Window)
+        return true;   // every mode: hold Window bars at the most
+    switch(ExitMode)
+    {
+    case EXIT_NET:
+        return out.Get(0) <= 0.5 + ExitMargin;
+    case EXIT_TRAIL:
+        //	the last exit feature is tanh(drop from the best pnl / (ATR*sqrt(Window))), so this is drop >= TrailK * ATR*sqrt(Window)
+        return s.f[EXIT_FEATURES - 1] >= MathTanh(TrailK);
+    }
+    return false;
 }
 //+------------------------------------------------------------------+
 //|                                                                  |
