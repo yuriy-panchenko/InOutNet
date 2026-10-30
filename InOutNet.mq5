@@ -43,6 +43,7 @@ input ExitRule ExitMode = EXIT_FIXED;	//	How a position is closed (every mode cl
 input double ExitMargin = 0.0;	//	EXIT_NET: close when the exit network's output <= 0.5 + this
 input double TrailK = 0.5;	//	EXIT_TRAIL: close when the drop from the best pnl reaches this, in ATR * sqrt(Window)
 input int ExportEvery = 0;	//	Export every Nth matured sample to InOutNet_samples.csv (0 = off)
+input bool ExportSeries = false;	//	Write one row per bar (prices, features, entry outputs) to InOutNet_series.csv for offline exit research
 input string LogFile = "InOutNet_log.txt";	//	Also append log lines to this file in the common folder (empty = off)
 
 //+------------------------------------------------------------------+
@@ -109,6 +110,8 @@ double gActNFAll = 0, gActFAll = 0;
 int gAtr = INVALID_HANDLE;
 ulong gPosTicket = 0;	//	our open position, as seen by TrackPosition
 double gPosPeak = 0;	//	best mark-to-market pnl of it since open, in price units
+datetime gBarTrack = 0;	//	the bar whose ticks TrackBarExtremes is following
+double gBarMaxBid = 0, gBarMinAsk = 0, gPrevMaxBid = 0, gPrevMinAsk = 0;	//	tick extremes of that bar and of the one before
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -118,6 +121,8 @@ int OnInit()
     LogInit(LogFile);
     if(ExportEvery > 0)
         ExportOpen("InOutNet_samples.csv");
+    if(ExportSeries)
+        SeriesOpen("InOutNet_series.csv");
     Log(StringFormat("=== run %s  Window=%d K=%.3f SpreadMult=%.2f Cutoff=%.3f LearnRate=%.4f Seed=%d WarmUp=%d SL=%.2f TP=%.2f",
                      Symbol(), Window, K, SpreadMult, Cutoff, LearnRate, Seed, WarmUp, StopLoss, MarketTarget));
     MathSrand(Seed);
@@ -140,6 +145,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
     ExportClose();
+    SeriesClose();
     if(gAtr != INVALID_HANDLE)
         IndicatorRelease(gAtr);
 }
@@ -154,6 +160,9 @@ void OnTick()
     if(!SymbolInfoTick(Symbol(), lastTick))
         return;
     bool const isNewBar = current_bar_time != g_last_bar_time;
+
+    if(ExportSeries)
+        TrackBarExtremes(current_bar_time);
 
     //	update all virtual trades with current bis/ask
     entrySams.Update(lastTick);
@@ -234,6 +243,9 @@ void OnTick()
         //	add new virtual trades buy and sell
         entrySams.Add(Entry::Sample(enStt, current_bar_time, atr, lastTick, out.Get(0), out.Get(1)));
         g_last_bar_time = current_bar_time;
+
+        if(ExportSeries)
+            SeriesRow(current_bar_time, lastTick, atr, gPrevMaxBid, gPrevMinAsk, enStt, out.Get(0), out.Get(1), gIn.Trained() >= WarmUp);
 
         if(ExitPerBar > 0)
             ExitStep(enStt, atr);
@@ -382,6 +394,25 @@ void ExitStep(Entry::State const &market, double atr)
         double const pred = gOut.Think(ToInput(st)).Get(0);
         exitQ.Push(Exit::Sample(st, gExitBar, isBuy, isBuy ? lastTick.bid : lastTick.ask, atr, pred));
     }
+}
+//+------------------------------------------------------------------+
+//| Highest bid and lowest ask over the ticks of every bar. Only the |
+//| series export needs them: a virtual trade tracks its peak and    |
+//| dip on every tick, and offline we only have bars.                |
+//+------------------------------------------------------------------+
+void TrackBarExtremes(datetime barTime)
+{
+    if(barTime != gBarTrack)
+    {
+        gPrevMaxBid = gBarTrack == 0 ? lastTick.bid : gBarMaxBid;
+        gPrevMinAsk = gBarTrack == 0 ? lastTick.ask : gBarMinAsk;
+        gBarMaxBid = lastTick.bid;
+        gBarMinAsk = lastTick.ask;
+        gBarTrack = barTime;
+        return;
+    }
+    gBarMaxBid = MathMax(gBarMaxBid, lastTick.bid);
+    gBarMinAsk = MathMin(gBarMinAsk, lastTick.ask);
 }
 //+------------------------------------------------------------------+
 //| Mark-to-market pnl of the selected position, in price units.     |
